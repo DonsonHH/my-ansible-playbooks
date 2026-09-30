@@ -27,6 +27,12 @@ ansible/
 
 ## 常用操作
 
+### 按用户流量计量（可选）
+
+新增 [Kenxu Xray 计量部署说明](docs/kenxu-meter.md)。仅对显式注册的节点和用户启用；保留原客户端，并以独立 UUID 记录用户上传/下载。`kenxu_meter.yml` 可用于后续普通节点接入，UK/SG2 多线路需要另行适配。
+
+默认的原有部署流程不启用计量。将 `kenxu_meter_enabled` 设为 true 时，Xray 模板更新后会重新同步受管客户端，避免下次运维覆盖账号。
+
 - 新建/编辑加密变量
 ```bash
 ansible-vault edit group_vars/all/vault.yml

@@ -5,3 +5,7 @@ group_vars/all/vault.yml
 inventory.ini
 vault_passwd
 wireguard
+__pycache__/
+*.pyc
+*meter-registration*.json
+private/

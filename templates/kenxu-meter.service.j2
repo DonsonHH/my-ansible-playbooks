@@ -1,0 +1,20 @@
+[Unit]
+Description=Kenxu Xray per-user traffic collector
+After=network-online.target xray.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/lib/kenxu-meter/kenxu_meter.py --config /etc/kenxu-meter/config.json
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/kenxu-meter /usr/local/etc/xray
+
+[Install]
+WantedBy=multi-user.target

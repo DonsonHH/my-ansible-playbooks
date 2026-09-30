@@ -206,6 +206,18 @@
         owner: root
         group: root
 
+    - name: Reconcile managed Xray clients after a template update
+      tags: [xray]
+      become: "{{ ansible_user != 'root' }}"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - /usr/local/lib/kenxu-meter/kenxu_meter.py
+          - --bootstrap
+      when: kenxu_meter_enabled | default(false) | bool
+      changed_when: true
+      no_log: true
+
     - name: Allow 443/tcp in ufw for xray
       tags: [xray]
       become: "{{ ansible_user != 'root' }}"

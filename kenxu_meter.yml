@@ -1,0 +1,71 @@
+- name: Opt-in Kenxu Xray user metering
+  hosts: all
+  become: true
+  vars:
+    kenxu_meter_inbound_port: 443
+    kenxu_meter_api_port: 10085
+    kenxu_meter_bootstrap: false
+  tasks:
+    - name: Require explicit meter registration and private transport endpoint
+      ansible.builtin.assert:
+        that:
+          - kenxu_meter_node_id is defined
+          - kenxu_meter_token is defined
+          - kenxu_meter_token | length >= 30
+          - kenxu_meter_origin is defined
+          - kenxu_meter_origin is match('^https://[^/]+$')
+      no_log: true
+
+    - name: Create private meter directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      loop:
+        - /var/lib/kenxu-meter
+        - /etc/kenxu-meter
+        - /usr/local/lib/kenxu-meter
+
+    - name: Install collector
+      ansible.builtin.copy:
+        src: files/kenxu_meter.py
+        dest: /usr/local/lib/kenxu-meter/kenxu_meter.py
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Write private registration without exposing the token
+      ansible.builtin.copy:
+        content: "{{ {'portal_origin': kenxu_meter_origin, 'node_id': kenxu_meter_node_id, 'token': kenxu_meter_token, 'inbound_port': kenxu_meter_inbound_port | int, 'api_port': kenxu_meter_api_port | int} | to_nice_json }}"
+        dest: /etc/kenxu-meter/config.json
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+
+    - name: Install service
+      ansible.builtin.template:
+        src: templates/kenxu-meter.service.j2
+        dest: /etc/systemd/system/kenxu-meter.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Bootstrap only when explicitly requested
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - /usr/local/lib/kenxu-meter/kenxu_meter.py
+          - --bootstrap
+      when: kenxu_meter_bootstrap | bool
+      changed_when: true
+      no_log: true
+
+    - name: Start persistent collection
+      ansible.builtin.systemd:
+        name: kenxu-meter
+        enabled: true
+        state: started
+        daemon_reload: true
