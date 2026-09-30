@@ -32,6 +32,22 @@ class MeterTests(unittest.TestCase):
         result = meter.parse_counters({'stat': [{'name': 'user>>>kenxu:a:n>>>traffic>>>uplink', 'value': '120'}, {'name': 'user>>>kenxu:a:n>>>traffic>>>downlink', 'value': 300}, {'name': 'user>>>private>>>traffic>>>uplink', 'value': 1000}, {'name': 'inbound>>>all>>>traffic>>>downlink', 'value': 9000}]})
         self.assertEqual(result, [{'email': 'kenxu:a:n', 'up': 120, 'down': 300}])
 
+    def test_shared_core_keeps_uk_users_on_uk_outbound(self):
+        original = {'inbounds': [{'port': 443, 'protocol': 'vless', 'settings': {'clients': [{'id': 'legacy', 'email': 'private'}]}}], 'outbounds': [{'tag': 'block'}, {'tag': 'uk-gusecure2'}], 'routing': {'rules': [{'type': 'field', 'user': ['personal-uk'], 'outboundTag': 'uk-gusecure2'}]}}
+        clients = [{'id': 'a', 'email': 'kenxu:a:sg', 'level': 88}, {'id': 'b', 'email': 'kenxu:a:uk', 'level': 88}]
+        routes = [{'nodeId': 'sg', 'clients': clients[:1]}, {'nodeId': 'uk', 'outboundTag': 'uk-gusecure2', 'clients': clients[1:]}]
+        patched, _ = meter.prepare_config(original, clients, routes=routes)
+        self.assertEqual(patched['routing']['rules'][1]['user'], ['kenxu:a:uk'])
+        self.assertEqual(patched['routing']['rules'][1]['outboundTag'], 'uk-gusecure2')
+        self.assertEqual(patched['routing']['rules'][-1], original['routing']['rules'][0])
+        self.assertEqual(meter.prepare_config(patched, clients, routes=routes)[0], patched)
+        self.assertEqual(meter.prepare_config(patched, [clients[0]], routes=[routes[0]])[0]['routing']['rules'][-1], original['routing']['rules'][0])
+
+    def test_zero_exit_with_no_added_users_is_not_success(self):
+        with self.assertRaises(RuntimeError):
+            meter.validate_added('processing inbound: test\nfailed to build config: missing settings\nAdded 0 user(s) in total.', 2)
+        meter.validate_added('Added 2 user(s) in total.', 2)
+
 
 if __name__ == '__main__':
     unittest.main()

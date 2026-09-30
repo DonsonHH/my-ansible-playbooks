@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import signal
 import sqlite3
 import stat
@@ -36,7 +37,7 @@ def atomic_json(path, value, owner=None, mode=0o600):
             os.unlink(temporary)
 
 
-def prepare_config(original, clients, inbound_port=443, api_port=10085):
+def prepare_config(original, clients, inbound_port=443, api_port=10085, routes=None):
     config = copy.deepcopy(original)
     matches = [i for i in config.get('inbounds', []) if i.get('protocol') == 'vless' and i.get('port') == inbound_port]
     if len(matches) != 1:
@@ -62,8 +63,19 @@ def prepare_config(original, clients, inbound_port=443, api_port=10085):
     # New users must not bypass an old user-specific LAN block rule.
     rules = config.setdefault('routing', {}).setdefault('rules', [])
     rules[:] = [r for r in rules if not r.get('_kenxu_managed')]
+    rules[:] = [r for r in rules if not r.get('ruleTag', '').startswith('kenxu-route-')]
     marker_emails = [c['email'] for c in clients]
     rules[:] = [r for r in rules if not (r.get('ip') == ['geoip:private'] and isinstance(r.get('user'), list) and all(e.startswith('kenxu:') for e in r['user']))]
+    managed_rules = []
+    for route in routes or []:
+        outbound = route.get('outboundTag')
+        emails = [c['email'] for c in route['clients']]
+        if outbound:
+            if not any(o.get('tag') == outbound for o in config.get('outbounds', [])):
+                raise ValueError('Managed route outbound missing')
+            if emails:
+                managed_rules.append({'ruleTag': 'kenxu-route-' + route['nodeId'], 'type': 'field', 'user': emails, 'outboundTag': outbound})
+    rules[0:0] = managed_rules
     if marker_emails:
         if not any(o.get('tag') == 'block' for o in config.get('outbounds', [])):
             raise ValueError('A block outbound is required for managed users')
@@ -84,12 +96,28 @@ def parse_counters(response):
     return sorted(values.values(), key=lambda c: c['email'])
 
 
+def validate_added(output, expected):
+    # Xray adu prints build/API errors but may still return exit code zero.
+    counts = re.findall(r'Added (\d+) user\(s\) in total\.', output)
+    if counts != [str(expected)]:
+        raise RuntimeError('Xray did not acknowledge all managed users')
+
+
+def client_identity(client):
+    return {'id': client['id'], 'level': client.get('level', 0), 'flow': client.get('flow', '')}
+
+
 class Meter:
     def __init__(self, config_path):
         self.settings = json.loads(pathlib.Path(config_path).read_text())
         self.root = pathlib.Path(self.settings.get('state_dir', '/var/lib/kenxu-meter'))
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.root, 0o700)
+        self.lock = (self.root / 'process.lock').open('a')
+        try:
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('Collector already running; stop its service before maintenance') from None
         self.db = sqlite3.connect(self.root / 'queue.sqlite')
         os.chmod(self.root / 'queue.sqlite', 0o600)
         self.db.executescript('CREATE TABLE IF NOT EXISTS queue(id INTEGER PRIMARY KEY,payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS sequence(epoch TEXT PRIMARY KEY,value INTEGER NOT NULL);')
@@ -105,7 +133,7 @@ class Meter:
         return result.stdout
 
     def process_epoch(self):
-        pid = int(subprocess.check_output(['systemctl', 'show', 'xray', '-p', 'MainPID', '--value'], text=True).strip())
+        pid = int(subprocess.check_output(['systemctl', 'show', self.settings.get('xray_service', 'xray'), '-p', 'MainPID', '--value'], text=True).strip())
         if pid <= 0:
             raise RuntimeError('Xray is not running')
         start = pathlib.Path('/proc/' + str(pid) + '/stat').read_text().split(') ', 1)[1].split()[19]
@@ -115,14 +143,15 @@ class Meter:
     def request(self, endpoint, body=None):
         origin = self.settings['portal_origin']
         parsed = urllib.parse.urlsplit(origin)
-        if parsed.scheme != 'https' or parsed.path or parsed.query or parsed.fragment:
-            raise ValueError('HTTPS portal origin required')
+        local_http = parsed.scheme == 'http' and parsed.hostname == '127.0.0.1'
+        if (parsed.scheme != 'https' and not local_http) or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
+            raise ValueError('HTTPS or explicit IPv4 loopback portal origin required')
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(origin + endpoint, data=data, headers={'Authorization': 'Bearer ' + self.settings['token'], 'Content-Type': 'application/json', 'User-Agent': 'Kenxu-Meter/1'})
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *args):
                 return None
-        with urllib.request.build_opener(NoRedirect).open(request, timeout=10) as response:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect).open(request, timeout=10) as response:
             raw = response.read(524289)
             if len(raw) > 524288:
                 raise ValueError('Oversized response')
@@ -139,8 +168,11 @@ class Meter:
     def sample(self):
         if not self.desired:
             return
-        self.epoch = self.process_epoch()
+        epoch = self.process_epoch()
         raw = self.run_command(self.settings.get('xray_binary', '/usr/local/bin/xray'), 'api', 'statsquery', '-s', '127.0.0.1:' + str(self.settings.get('api_port', 10085)), '-pattern', 'kenxu:')
+        if self.process_epoch() != epoch:
+            raise RuntimeError('Core restarted during sample; retry next cycle')
+        self.epoch = epoch
         counters = parse_counters(json.loads(raw))
         with self.db:
             last = self.db.execute('SELECT value FROM sequence WHERE epoch=?', (self.epoch,)).fetchone()
@@ -160,14 +192,17 @@ class Meter:
             raise ValueError('Invalid desired state')
         target = pathlib.Path(self.settings.get('xray_config', '/usr/local/etc/xray/config.json'))
         old = json.loads(target.read_text())
-        updated, tag = prepare_config(old, desired['clients'], self.settings.get('inbound_port', 443), self.settings.get('api_port', 10085))
+        updated, tag = prepare_config(old, desired['clients'], self.settings.get('inbound_port', 443), self.settings.get('api_port', 10085), desired.get('routes'))
         old_inbound = next(i for i in old['inbounds'] if i.get('protocol') == 'vless' and i.get('port') == self.settings.get('inbound_port', 443))
         old_managed = {c['email']: c for c in old_inbound['settings']['clients'] if c.get('email', '').startswith('kenxu:')}
         new_managed = {c['email']: c for c in desired['clients']}
         infrastructure_changed = old.get('api') != updated.get('api') or old.get('stats') != updated.get('stats') or old.get('policy') != updated.get('policy') or old_inbound.get('tag') != tag
         if infrastructure_changed and not bootstrap:
             raise RuntimeError('Bootstrap required before automated sync')
-        if updated != old:
+        identities = {email: client_identity(c) for email, c in new_managed.items()}
+        runtime = self.runtime_users(tag) if not infrastructure_changed else {}
+        mismatch = runtime != identities
+        if updated != old or mismatch:
             owner_stat = target.stat()
             candidate = self.root / 'candidate.json'
             atomic_json(candidate, updated)
@@ -183,29 +218,49 @@ class Meter:
             atomic_json(target, updated, (owner_stat.st_uid, owner_stat.st_gid), stat.S_IMODE(owner_stat.st_mode))
             try:
                 if bootstrap:
-                    self.run_command('systemctl', 'restart', 'xray')
+                    self.restart_core()
                 else:
                     server = '127.0.0.1:' + str(self.settings.get('api_port', 10085))
-                    for email, client in old_managed.items():
-                        if new_managed.get(email) != client:
+                    for email, identity in runtime.items():
+                        if identities.get(email) != identity:
                             self.run_command(self.settings.get('xray_binary', '/usr/local/bin/xray'), 'api', 'rmu', '-s', server, '-tag', tag, email)
-                    added = [c for email, c in new_managed.items() if old_managed.get(email) != c]
+                    added = [c for email, c in new_managed.items() if runtime.get(email) != identities[email]]
                     if added:
                         addition = self.root / 'add-users.json'
-                        atomic_json(addition, {'inbounds': [{'tag': tag, 'protocol': 'vless', 'settings': {'clients': added}}]})
-                        self.run_command(self.settings.get('xray_binary', '/usr/local/bin/xray'), 'api', 'adu', '-s', server, str(addition))
+                        inbound_addition = copy.deepcopy(next(i for i in updated['inbounds'] if i.get('tag') == tag))
+                        inbound_addition['settings']['clients'] = added
+                        atomic_json(addition, {'inbounds': [inbound_addition]})
+                        output = self.run_command(self.settings.get('xray_binary', '/usr/local/bin/xray'), 'api', 'adu', '-s', server, str(addition))
+                        validate_added(output, len(added))
                     # User-specific private-network block list changed: persist it
                     # and reload rules using the API without restarting the core.
                     routing = self.root / 'routing.json'
                     atomic_json(routing, {'routing': updated['routing']})
                     self.run_command(self.settings.get('xray_binary', '/usr/local/bin/xray'), 'api', 'adrules', '-s', server, str(routing))
+                if self.runtime_users(tag) != identities:
+                    raise RuntimeError('Managed user runtime readback mismatch')
             except Exception:
                 atomic_json(target, old, (owner_stat.st_uid, owner_stat.st_gid), stat.S_IMODE(owner_stat.st_mode))
-                self.run_command('systemctl', 'restart', 'xray')
+                self.restart_core()
                 raise RuntimeError('Sync failed; previous config restored')
         self.desired = desired
         atomic_json(self.root / 'desired.json', desired)
         self.last_sync = time.monotonic()
+
+    def runtime_users(self, tag):
+        output = self.run_command(self.settings.get('xray_binary', '/usr/local/bin/xray'), 'api', 'inbounduser', '-s', '127.0.0.1:' + str(self.settings.get('api_port', 10085)), '-tag', tag)
+        return {u['email']: client_identity({'id': u['account']['id'], 'level': u.get('level', 0), 'flow': u['account'].get('flow', '')}) for u in json.loads(output).get('users', []) if u.get('email', '').startswith('kenxu:')}
+
+    def restart_core(self):
+        self.run_command('systemctl', 'restart', self.settings.get('xray_service', 'xray'))
+        for attempt in range(10):
+            try:
+                self.process_epoch()
+                self.run_command(self.settings.get('xray_binary', '/usr/local/bin/xray'), 'api', 'statsquery', '-s', '127.0.0.1:' + str(self.settings.get('api_port', 10085)), '-pattern', 'kenxu:')
+                return
+            except (RuntimeError, OSError, ValueError):
+                time.sleep(0.5)
+        raise RuntimeError('Core failed its readiness check')
 
     def run(self):
         cached = self.root / 'desired.json'

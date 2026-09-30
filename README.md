@@ -29,9 +29,9 @@ ansible/
 
 ### 按用户流量计量（可选）
 
-新增 [Kenxu Xray 计量部署说明](docs/kenxu-meter.md)。仅对显式注册的节点和用户启用；保留原客户端，并以独立 UUID 记录用户上传/下载。`kenxu_meter.yml` 可用于后续普通节点接入，UK/SG2 多线路需要另行适配。
+新增 [Kenxu Xray 计量部署说明](docs/kenxu-meter.md)。保留原客户端，并以独立 UUID 记录用户上传/下载。支持每个 Xray 核心一个采集器、多条逻辑线路，普通入口与 UK/SG2 可分别计量；第三方可使用独立的回环 WebSocket 中转入口。
 
-默认的原有部署流程不启用计量。将 `kenxu_meter_enabled` 设为 true 时，Xray 模板更新后会重新同步受管客户端，避免下次运维覆盖账号。
+默认流程不启用计量。将 `kenxu_meter_enabled` 设为 true 时，普通 Xray 模板更新后会重新同步受管客户端。`software.yml` 会阻止直接覆盖定制转发拓扑；SG2/UK 等定制主机应使用 `kenxu_meter.yml` 保留其原始配置。
 
 - 新建/编辑加密变量
 ```bash

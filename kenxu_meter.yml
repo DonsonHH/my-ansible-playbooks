@@ -5,6 +5,8 @@
     kenxu_meter_inbound_port: 443
     kenxu_meter_api_port: 10085
     kenxu_meter_bootstrap: false
+    kenxu_meter_xray_service: xray
+    kenxu_meter_xray_config: /usr/local/etc/xray/config.json
   tasks:
     - name: Require explicit meter registration and private transport endpoint
       ansible.builtin.assert:
@@ -13,7 +15,7 @@
           - kenxu_meter_token is defined
           - kenxu_meter_token | length >= 30
           - kenxu_meter_origin is defined
-          - kenxu_meter_origin is match('^https://[^/]+$')
+          - kenxu_meter_origin is match('^https://[^/]+$') or kenxu_meter_origin is match('^http://127\\.0\\.0\\.1:[0-9]+$')
       no_log: true
 
     - name: Create private meter directories
@@ -38,7 +40,7 @@
 
     - name: Write private registration without exposing the token
       ansible.builtin.copy:
-        content: "{{ {'portal_origin': kenxu_meter_origin, 'node_id': kenxu_meter_node_id, 'token': kenxu_meter_token, 'inbound_port': kenxu_meter_inbound_port | int, 'api_port': kenxu_meter_api_port | int} | to_nice_json }}"
+        content: "{{ {'portal_origin': kenxu_meter_origin, 'node_id': kenxu_meter_node_id, 'token': kenxu_meter_token, 'inbound_port': kenxu_meter_inbound_port | int, 'api_port': kenxu_meter_api_port | int, 'xray_service': kenxu_meter_xray_service, 'xray_config': kenxu_meter_xray_config} | to_nice_json }}"
         dest: /etc/kenxu-meter/config.json
         owner: root
         group: root
@@ -52,6 +54,13 @@
         owner: root
         group: root
         mode: '0644'
+
+    - name: Stop the collector before exclusive bootstrap maintenance
+      ansible.builtin.systemd:
+        name: kenxu-meter
+        state: stopped
+        daemon_reload: true
+      when: kenxu_meter_bootstrap | bool
 
     - name: Bootstrap only when explicitly requested
       ansible.builtin.command:
@@ -67,5 +76,5 @@
       ansible.builtin.systemd:
         name: kenxu-meter
         enabled: true
-        state: started
+        state: restarted
         daemon_reload: true

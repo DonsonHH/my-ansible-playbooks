@@ -1,6 +1,6 @@
 [Unit]
 Description=Kenxu Xray per-user traffic collector
-After=network-online.target xray.service
+After=network-online.target {{ kenxu_meter_xray_service | default('xray') }}.service
 Wants=network-online.target
 
 [Service]
@@ -14,7 +14,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/kenxu-meter /usr/local/etc/xray
+ReadWritePaths=/var/lib/kenxu-meter {{ kenxu_meter_xray_config | default('/usr/local/etc/xray/config.json') | dirname }}
 
 [Install]
 WantedBy=multi-user.target

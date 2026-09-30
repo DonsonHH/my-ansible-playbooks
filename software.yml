@@ -195,6 +195,54 @@
         cmd: |
           bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
+    - name: Discover the actual Xray service identity
+      tags: [xray]
+      ansible.builtin.command:
+        argv: [/usr/bin/systemctl, show, xray, '-p', User, '--value']
+      register: xray_service_user
+      changed_when: false
+
+    - name: Discover its readable configuration group
+      tags: [xray]
+      ansible.builtin.command:
+        argv: [/usr/bin/id, '-gn', "{{ xray_service_user.stdout | trim | default('root', true) }}"]
+      register: xray_read_group
+      changed_when: false
+
+    - name: Inspect existing Xray custom topology before replacing its template
+      tags: [xray]
+      become: "{{ ansible_user != 'root' }}"
+      ansible.builtin.stat:
+        path: /usr/local/etc/xray/config.json
+      register: xray_existing_file
+
+    - name: Read existing topology privately
+      tags: [xray]
+      become: "{{ ansible_user != 'root' }}"
+      ansible.builtin.slurp:
+        src: /usr/local/etc/xray/config.json
+      register: xray_existing
+      when: xray_existing_file.stat.exists
+      no_log: true
+
+    - name: Refuse implicit destruction of custom forwarding or personal clients
+      tags: [xray]
+      ansible.builtin.assert:
+        that:
+          - (xray_existing.content | b64decode | from_json).outbounds | selectattr('tag', 'defined') | map(attribute='tag') | difference(['block', 'warp']) | length == 0
+          - (xray_existing.content | b64decode | from_json).inbounds | selectattr('protocol', 'equalto', 'vless') | map(attribute='settings.clients') | flatten | rejectattr('email', 'match', '^kenxu:') | list | length <= 1
+        fail_msg: Custom topology detected. Use kenxu_meter.yml on this host; do not replace its base template without an explicit migration.
+      when: xray_existing_file.stat.exists
+      no_log: true
+
+    - name: Stop collector for an exclusive base-template update
+      tags: [xray]
+      become: "{{ ansible_user != 'root' }}"
+      ansible.builtin.systemd:
+        name: kenxu-meter
+        state: stopped
+      when: kenxu_meter_enabled | default(false) | bool
+
     - name: Write xray config file
       tags: [xray]
       become: "{{ ansible_user != 'root' }}"
@@ -202,9 +250,9 @@
         force: true
         src: templates/xray.j2
         dest: /usr/local/etc/xray/config.json
-        mode: '0644'
+        mode: '0640'
         owner: root
-        group: root
+        group: "{{ xray_read_group.stdout | trim }}"
 
     - name: Reconcile managed Xray clients after a template update
       tags: [xray]
@@ -234,3 +282,11 @@
         name: xray
         state: restarted
         enabled: true
+
+    - name: Resume collector after an opt-in template update
+      tags: [xray]
+      become: "{{ ansible_user != 'root' }}"
+      ansible.builtin.systemd:
+        name: kenxu-meter
+        state: started
+      when: kenxu_meter_enabled | default(false) | bool
