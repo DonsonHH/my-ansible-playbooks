@@ -1,0 +1,23 @@
+- name: Read-only preparation for a future per-flow metering pilot
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Inspect core, existing counters and custom UK topology without mutation
+      ansible.builtin.script:
+        cmd: tools/flow_preflight.py
+        executable: /usr/bin/python3
+      register: kenxu_flow_preflight
+      changed_when: false
+      no_log: true
+
+    - name: Show only sanitized readiness facts
+      ansible.builtin.debug:
+        msg: "{{ kenxu_flow_preflight.stdout | trim | from_json }}"
+
+    - name: Keep this preflight separate from any rollout
+      ansible.builtin.assert:
+        that:
+          - not ((kenxu_flow_preflight.stdout | trim | from_json).flowRolloutEnabled | bool)
+          - not ((kenxu_flow_preflight.stdout | trim | from_json).mutationsPerformed | bool)
+        fail_msg: This is a read-only design preflight, not a flow-collector installer. Inspect any already-enabled custom rollout separately.

@@ -95,6 +95,8 @@ Only private administrators query these records. User profile data exposes only 
 
 ## Operational checks
 
+For the next per-connection byte-metering phase, see the [design and acceptance gates](kenxu-flow-design.md). The optional `kenxu_flow_preflight.yml` only inspects sanitized state; `tools/flow_contract.py` is an offline replay oracle, not a production collector or a core patch. Existing services and byte accounting remain unchanged.
+
 ```sh
 systemctl is-active xray kenxu-meter
 ss -lnt '( sport = :10085 )'
