@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from kenxu_activity import access_batch, online_sources
 
 
 def atomic_json(path, value, owner=None, mode=0o600):
@@ -37,7 +38,7 @@ def atomic_json(path, value, owner=None, mode=0o600):
             os.unlink(temporary)
 
 
-def prepare_config(original, clients, inbound_port=443, api_port=10085, routes=None):
+def prepare_config(original, clients, inbound_port=443, api_port=10085, routes=None, activity_log=None):
     config = copy.deepcopy(original)
     matches = [i for i in config.get('inbounds', []) if i.get('protocol') == 'vless' and i.get('port') == inbound_port]
     if len(matches) != 1:
@@ -60,6 +61,9 @@ def prepare_config(original, clients, inbound_port=443, api_port=10085, routes=N
     config.setdefault('stats', {})
     level = config.setdefault('policy', {}).setdefault('levels', {}).setdefault('88', {})
     level.update(statsUserUplink=True, statsUserDownlink=True)
+    if activity_log:
+        level['statsUserOnline'] = True
+        config.setdefault('log', {}).update(access=activity_log, loglevel='warning', dnsLog=False)
     # New users must not bypass an old user-specific LAN block rule.
     rules = config.setdefault('routing', {}).setdefault('rules', [])
     rules[:] = [r for r in rules if not r.get('_kenxu_managed')]
@@ -125,6 +129,7 @@ class Meter:
         self.last_sync = 0
         self.stop = False
         self.epoch = self.process_epoch()
+        self.previous_counters = {}
 
     def run_command(self, *args):
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
@@ -158,6 +163,10 @@ class Meter:
             return json.loads(raw)
 
     def flush(self):
+        # Keep accounting indefinitely through outages, but redact private
+        # metadata older than 30 days, including from the durable node queue.
+        with self.db:
+            self.db.execute("UPDATE queue SET payload=json_set(payload,'$.activity',json('[]')) WHERE json_extract(payload,'$.at')<? AND json_array_length(payload,'$.activity')>0", (int(time.time()*1000)-30*86400000,))
         for row_id, payload in self.db.execute('SELECT id,payload FROM queue ORDER BY id LIMIT 100').fetchall():
             result = self.request('/api/meter/report', json.loads(payload))
             if not result.get('ok'):
@@ -175,11 +184,37 @@ class Meter:
         self.epoch = epoch
         counters = parse_counters(json.loads(raw))
         with self.db:
+            activity = []
+            if self.settings.get('activity_enabled'):
+                try:
+                    records = access_batch(self.db, self.settings.get('access_log', '/var/log/kenxu/access.log'), int(time.time()*1000))
+                    for counter in counters:
+                        email = counter['email']
+                        if self.previous_counters.get(email) == (counter['up'], counter['down']) and email not in records:
+                            continue
+                        row = records.setdefault(email, {'email': email, 'sources': [], 'targets': [], 'connections': 0})
+                        try:
+                            response = json.loads(self.run_command(self.settings.get('xray_binary', '/usr/local/bin/xray'), 'api', 'statsonlineiplist', '-s', '127.0.0.1:' + str(self.settings.get('api_port', 10085)), '-t', '1', '-email', email))
+                            for ip in online_sources(response):
+                                if ip not in row['sources'] and len(row['sources']) < 16:
+                                    row['sources'].append(ip)
+                        except (RuntimeError, ValueError, OSError):
+                            pass
+                    for record in list(records.values())[:200]:
+                        if len(json.dumps(activity + [record]).encode()) > 131072:
+                            break
+                        activity.append(record)
+                except Exception as exc:
+                    # Metadata errors must not stop authoritative accounting.
+                    print('Activity sample deferred: ' + type(exc).__name__, flush=True)
             last = self.db.execute('SELECT value FROM sequence WHERE epoch=?', (self.epoch,)).fetchone()
             seq = last[0] + 1 if last else 1
             payload = {'epoch': self.epoch, 'seq': seq, 'at': int(time.time() * 1000), 'revision': self.desired['revision'], 'counters': counters}
+            if self.settings.get('activity_enabled'):
+                payload['activity'] = activity
             self.db.execute('INSERT INTO sequence VALUES(?,?) ON CONFLICT(epoch) DO UPDATE SET value=excluded.value', (self.epoch, seq))
             self.db.execute('INSERT INTO queue(payload) VALUES(?)', (json.dumps(payload),))
+        self.previous_counters = {c['email']: (c['up'], c['down']) for c in counters}
 
     def sync(self, bootstrap=False):
         with (self.root / 'sync.lock').open('a') as lock:
@@ -192,11 +227,11 @@ class Meter:
             raise ValueError('Invalid desired state')
         target = pathlib.Path(self.settings.get('xray_config', '/usr/local/etc/xray/config.json'))
         old = json.loads(target.read_text())
-        updated, tag = prepare_config(old, desired['clients'], self.settings.get('inbound_port', 443), self.settings.get('api_port', 10085), desired.get('routes'))
+        updated, tag = prepare_config(old, desired['clients'], self.settings.get('inbound_port', 443), self.settings.get('api_port', 10085), desired.get('routes'), self.settings.get('access_log', '/var/log/kenxu/access.log') if self.settings.get('activity_enabled') else None)
         old_inbound = next(i for i in old['inbounds'] if i.get('protocol') == 'vless' and i.get('port') == self.settings.get('inbound_port', 443))
         old_managed = {c['email']: c for c in old_inbound['settings']['clients'] if c.get('email', '').startswith('kenxu:')}
         new_managed = {c['email']: c for c in desired['clients']}
-        infrastructure_changed = old.get('api') != updated.get('api') or old.get('stats') != updated.get('stats') or old.get('policy') != updated.get('policy') or old_inbound.get('tag') != tag
+        infrastructure_changed = old.get('api') != updated.get('api') or old.get('stats') != updated.get('stats') or old.get('policy') != updated.get('policy') or old.get('log') != updated.get('log') or old_inbound.get('tag') != tag
         if infrastructure_changed and not bootstrap:
             raise RuntimeError('Bootstrap required before automated sync')
         identities = {email: client_identity(c) for email, c in new_managed.items()}

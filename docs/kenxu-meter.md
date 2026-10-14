@@ -25,6 +25,7 @@ kenxu_meter_inbound_port: 443
 kenxu_meter_api_port: 10085
 kenxu_meter_xray_service: xray
 kenxu_meter_xray_config: /usr/local/etc/xray/config.json
+kenxu_meter_activity_enabled: true
 ```
 
 Install only on the selected host:
@@ -77,6 +78,20 @@ The UK route through ocproxy/OpenConnect is TCP-only. Its generated subscription
 - HTTP/TLS/proxy overhead can make the counter slightly larger than a file's payload size. It is not a provider billing statement.
 - An abrupt process crash can lose bytes since the last sample; counters live in Xray memory. Ordinary polling does not guarantee zero-loss accounting.
 - The first-version queue assumes a stable registration and portal schema. If the portal rejects a queued report, repair the mismatch instead of deleting the queue or resetting counters blindly.
+
+## Private activity metadata (Kenxu 1.5.0+)
+
+Upgrade the portal first. The dedicated meter playbook enables metadata by default; ordinary `common.yml` deployments still do not opt a server into metering. Existing meter registrations are reused: do not rotate tokens, UUIDs, logical routes or queue state for this upgrade.
+
+Run the playbook with `kenxu_meter_bootstrap=true`, one physical server at a time. On an existing installation it first stops the old collector and runs its old installed version once to drain final counters **before replacing code or restarting Xray**; a failed drain resumes the old service and aborts. This adds `statsUserOnline` to managed level 88 and a private access log; enabling or changing log infrastructure requires bootstrap, not just hot user synchronization. A hot update refuses missing infrastructure before changing files. One core restart briefly interrupts that server's connections. On later normal updates leave bootstrap false.
+
+The Xray service account must own `/var/log/kenxu` (default `xray:xray`, mode 0700); the root collector reads it. Install logrotate and ensure its daily timer/cron runs. The supplied stanza compresses and rotates by age (30 days) and checked size (10M); size is checked when logrotate runs, not a hard instantaneous disk cap. If the Xray service uses a different account, adapt directory ownership and `su` together before bootstrap. Raw logging is local and private, not journal output.
+
+The parser accepts only authenticated `kenxu:` access records. It reads at most 1 MiB per sample, validates source IP and destination host/IP+port, limits targets, tracks a durable inode/offset cursor in the same transaction as queued reports, and bounds metadata to 128 KiB per report. Native online-IP queries supplement sources for ongoing connections. No URL path, payload, cookies, TLS decryption or external GeoIP calls are involved. Copy-truncate rotation and long-lived connections can omit target observations; these are best-effort metadata, not new accounting counters.
+
+The portal joins observed new targets and sources to existing **minute/logical-route byte totals**. Stock Xray does not supply per-target bytes: a row with multiple targets is not attribution of that row's entire usage to each target. Delayed samples retain accounting; metadata older than 30 days is redacted even from retry queues, while byte reports continue retrying. Portal 1.5.0 hashes the accounting envelope independently of metadata so a redacted retry remains idempotent.
+
+Only private administrators query these records. User profile data exposes only that user's latest observed source IP. Tell invited users about the logging scope. Unmanaged, direct/unmetered and bypass connections cannot be observed. An offline MMDB on the portal optionally supplies approximate country/region; a Country database does not establish a city.
 
 ## Operational checks
 

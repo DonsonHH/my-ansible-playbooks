@@ -7,6 +7,7 @@
     kenxu_meter_bootstrap: false
     kenxu_meter_xray_service: xray
     kenxu_meter_xray_config: /usr/local/etc/xray/config.json
+    kenxu_meter_activity_enabled: true
   tasks:
     - name: Require explicit meter registration and private transport endpoint
       ansible.builtin.assert:
@@ -17,6 +18,68 @@
           - kenxu_meter_origin is defined
           - kenxu_meter_origin is match('^https://[^/]+$') or kenxu_meter_origin is match('^http://127\\.0\\.0\\.1:[0-9]+$')
       no_log: true
+
+    - name: Locate an existing collector before exclusive bootstrap maintenance
+      ansible.builtin.stat:
+        path: /usr/local/lib/kenxu-meter/kenxu_meter.py
+      register: kenxu_existing_collector
+
+    - name: Check that metadata infrastructure is already enabled for a hot update
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - "import json,sys; c=json.load(open(sys.argv[1])); sys.exit(0 if c.get('policy',{}).get('levels',{}).get('88',{}).get('statsUserOnline') and c.get('log',{}).get('access')=='/var/log/kenxu/access.log' else 1)"
+          - "{{ kenxu_meter_xray_config }}"
+      register: kenxu_activity_ready
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when:
+        - kenxu_meter_activity_enabled | bool
+        - not (kenxu_meter_bootstrap | bool)
+
+    - name: Require explicit bootstrap when enabling activity metadata
+      ansible.builtin.assert:
+        that: kenxu_activity_ready.rc == 0
+        fail_msg: Enable metadata with kenxu_meter_bootstrap=true, one server at a time; do not silently update core logging through a hot user sync.
+      when:
+        - kenxu_meter_activity_enabled | bool
+        - not (kenxu_meter_bootstrap | bool)
+
+    - name: Drain old process counters before replacing the collector or restarting Xray
+      when:
+        - kenxu_meter_bootstrap | bool
+        - kenxu_existing_collector.stat.exists
+      block:
+        - name: Stop the old collector
+          ansible.builtin.systemd:
+            name: kenxu-meter
+            state: stopped
+        - name: Flush the final counters using the old installed code
+          ansible.builtin.command:
+            argv: [/usr/bin/python3, /usr/local/lib/kenxu-meter/kenxu_meter.py, --once]
+          changed_when: true
+          no_log: true
+      rescue:
+        - name: Resume old collection after a failed drain
+          ansible.builtin.systemd:
+            name: kenxu-meter
+            state: started
+        - name: Refuse to restart the core with undrained counters
+          ansible.builtin.fail:
+            msg: Final counter drain failed; old collection resumed. Repair the portal/queue before upgrading.
+      always:
+        - name: Keep collection running while staging files and packages
+          ansible.builtin.systemd:
+            name: kenxu-meter
+            state: started
+
+    - name: Ensure the activity log rotation utility is installed
+      ansible.builtin.package:
+        name: logrotate
+        state: present
+      when: kenxu_meter_activity_enabled | bool
 
     - name: Create private meter directories
       ansible.builtin.file:
@@ -38,9 +101,35 @@
         group: root
         mode: '0700'
 
+    - name: Install bounded activity parser
+      ansible.builtin.copy:
+        src: files/kenxu_activity.py
+        dest: /usr/local/lib/kenxu-meter/kenxu_activity.py
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Create private Xray activity log directory
+      ansible.builtin.file:
+        path: /var/log/kenxu
+        state: directory
+        owner: xray
+        group: xray
+        mode: '0700'
+      when: kenxu_meter_activity_enabled | bool
+
+    - name: Install thirty-day bounded activity log rotation
+      ansible.builtin.copy:
+        src: files/kenxu-activity.logrotate
+        dest: /etc/logrotate.d/kenxu-activity
+        owner: root
+        group: root
+        mode: '0644'
+      when: kenxu_meter_activity_enabled | bool
+
     - name: Write private registration without exposing the token
       ansible.builtin.copy:
-        content: "{{ {'portal_origin': kenxu_meter_origin, 'node_id': kenxu_meter_node_id, 'token': kenxu_meter_token, 'inbound_port': kenxu_meter_inbound_port | int, 'api_port': kenxu_meter_api_port | int, 'xray_service': kenxu_meter_xray_service, 'xray_config': kenxu_meter_xray_config} | to_nice_json }}"
+        content: "{{ {'portal_origin': kenxu_meter_origin, 'node_id': kenxu_meter_node_id, 'token': kenxu_meter_token, 'inbound_port': kenxu_meter_inbound_port | int, 'api_port': kenxu_meter_api_port | int, 'xray_service': kenxu_meter_xray_service, 'xray_config': kenxu_meter_xray_config, 'activity_enabled': kenxu_meter_activity_enabled | bool, 'access_log': '/var/log/kenxu/access.log'} | to_nice_json }}"
         dest: /etc/kenxu-meter/config.json
         owner: root
         group: root
@@ -62,15 +151,24 @@
         daemon_reload: true
       when: kenxu_meter_bootstrap | bool
 
-    - name: Bootstrap only when explicitly requested
-      ansible.builtin.command:
-        argv:
-          - /usr/bin/python3
-          - /usr/local/lib/kenxu-meter/kenxu_meter.py
-          - --bootstrap
+    - name: Bootstrap only when explicitly requested and always resume collection
       when: kenxu_meter_bootstrap | bool
-      changed_when: true
-      no_log: true
+      block:
+        - name: Validate and apply infrastructure with a recoverable core backup
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - /usr/local/lib/kenxu-meter/kenxu_meter.py
+              - --bootstrap
+          changed_when: true
+          no_log: true
+      always:
+        - name: Resume collection after bootstrap success or restored-core failure
+          ansible.builtin.systemd:
+            name: kenxu-meter
+            enabled: true
+            state: started
+            daemon_reload: true
 
     - name: Start persistent collection
       ansible.builtin.systemd:

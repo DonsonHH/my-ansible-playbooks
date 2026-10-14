@@ -8,6 +8,7 @@ if [ ! -e /var/lib/kenxu-meter/pre-fleet-config.json ]; then
     install -m 600 /usr/local/etc/xray/config.json /var/lib/kenxu-meter/pre-fleet-config.json
 fi
 install -m 700 "$stage/kenxu_meter.py" /usr/local/lib/kenxu-meter/kenxu_meter.py
+install -m 600 "$stage/kenxu_activity.py" /usr/local/lib/kenxu-meter/kenxu_activity.py
 install -m 600 "$stage/registration.json" /etc/kenxu-meter/config.json
 install -m 644 "$stage/kenxu-meter.service" /etc/systemd/system/kenxu-meter.service
 systemctl daemon-reload

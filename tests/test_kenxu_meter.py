@@ -2,7 +2,11 @@ import importlib.util
 import pathlib
 import unittest
 import sys
+import json
+import sqlite3
+import time
 from unittest.mock import MagicMock
+sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / 'files'))
 
 if sys.platform == 'win32':
     sys.modules['fcntl'] = MagicMock()
@@ -13,6 +17,24 @@ spec.loader.exec_module(meter)
 
 
 class MeterTests(unittest.TestCase):
+    def test_queue_redacts_expired_metadata_without_dropping_accounting(self):
+        collector = meter.Meter.__new__(meter.Meter)
+        collector.db = sqlite3.connect(':memory:')
+        collector.db.execute('CREATE TABLE queue(id INTEGER PRIMARY KEY,payload TEXT NOT NULL)')
+        payload = {'at': int(time.time()*1000)-31*86400000, 'epoch': 'old', 'seq': 1, 'counters': [{'email':'kenxu:a:n','up':100,'down':900}], 'activity':[{'sources':['192.0.2.1']}]}
+        collector.db.execute('INSERT INTO queue(payload) VALUES(?)', (json.dumps(payload),))
+        collector.db.commit()
+        collector.request = MagicMock(side_effect=RuntimeError('Offline'))
+        with self.assertRaises(RuntimeError):
+            collector.flush()
+        saved = json.loads(collector.db.execute('SELECT payload FROM queue').fetchone()[0])
+        self.assertEqual(saved, {**payload, 'activity': []})
+        collector.request = MagicMock(return_value={'ok':True})
+        collector.flush()
+        self.assertEqual(collector.db.execute('SELECT count(*) FROM queue').fetchone()[0], 0)
+        self.assertEqual(collector.request.call_args.args[1]['counters'], payload['counters'])
+        collector.db.close()
+
     def test_patch_preserves_legacy_and_outbound_routing(self):
         original = {'inbounds': [{'port': 443, 'protocol': 'vless', 'settings': {'clients': [{'id': 'legacy', 'email': 'private'}]}, 'streamSettings': {'security': 'reality', 'realitySettings': {'privateKey': 'fixture'}}}], 'outbounds': [{'tag': 'block', 'protocol': 'blackhole'}, {'tag': 'warp', 'protocol': 'socks'}], 'routing': {'rules': [{'outboundTag': 'warp', 'domain': ['geosite:openai']}]}}
         clients = [{'id': 'managed', 'email': 'kenxu:test:node', 'level': 88, 'flow': 'xtls-rprx-vision'}]
@@ -27,6 +49,10 @@ class MeterTests(unittest.TestCase):
         removed, _ = meter.prepare_config(patched, [])
         self.assertEqual(len(removed['inbounds'][0]['settings']['clients']), 1)
         self.assertEqual(removed['routing']['rules'], original['routing']['rules'])
+        logging, _ = meter.prepare_config(patched, clients, activity_log='/var/log/kenxu/access.log')
+        self.assertTrue(logging['policy']['levels']['88']['statsUserOnline'])
+        self.assertEqual(logging['log'], {'access': '/var/log/kenxu/access.log', 'loglevel': 'warning', 'dnsLog': False})
+        self.assertNotIn('log', original)
 
     def test_counters_ignore_machine_and_unmanaged_users(self):
         result = meter.parse_counters({'stat': [{'name': 'user>>>kenxu:a:n>>>traffic>>>uplink', 'value': '120'}, {'name': 'user>>>kenxu:a:n>>>traffic>>>downlink', 'value': 300}, {'name': 'user>>>private>>>traffic>>>uplink', 'value': 1000}, {'name': 'inbound>>>all>>>traffic>>>downlink', 'value': 9000}]})
