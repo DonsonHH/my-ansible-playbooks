@@ -28,7 +28,7 @@ kenxu_meter_xray_config: /usr/local/etc/xray/config.json
 kenxu_meter_activity_enabled: true
 ```
 
-Install only on the selected host:
+For a normal update on an already bootstrapped host (including activity logging infrastructure), limit execution to the selected host:
 
 ```sh
 ansible-playbook kenxu_meter.yml -l YOUR_PILOT_HOST --ask-vault-pass
@@ -42,7 +42,7 @@ ansible-playbook kenxu_meter.yml -l YOUR_PILOT_HOST -e kenxu_meter_bootstrap=tru
 
 Normal synchronization persists client changes and applies add/remove users and routing through Xray APIs. Add-user requests contain a complete inbound configuration: minimal settings can fail construction while the Xray CLI still exits zero. The collector validates the acknowledged count and reads live users back before accepting synchronization. It also repairs a persisted-versus-runtime mismatch. A failed apply restores the prior config and restarts Xray. Do not expose API port 10085 in a cloud security group or firewall.
 
-Only allowlisted users receive managed UUIDs. Non-enrolled subscriptions retain their existing credentials. Enrolled users must refresh subscriptions. Disabled, password-change-pending or unassigned users are removed on the next successful desired-state sync, normally within 30 seconds. Deleting a user from Xray prevents new connections; existing long-lived sessions may persist until closed. Legacy personal credentials are preserved and cannot be attributed retroactively.
+Only allowlisted users receive managed UUIDs. Granted managed routes awaiting enrollment are omitted from subscriptions; they do not fall back to legacy shared credentials. The separately authorized direct/unmetered delivery mode is an explicit exception, not a default. Enrolled users must refresh subscriptions. Disabled, password-change-pending or unassigned users are removed on the next successful desired-state sync, normally within 30 seconds. Deleting a user from Xray prevents new connections; existing long-lived sessions may persist until closed. Legacy personal credentials are preserved and cannot be attributed retroactively.
 
 ## Configuration ownership
 
