@@ -2,6 +2,14 @@
 
 This playbook adds a local collector and managed clients to an existing native Xray deployment. It preserves legacy clients, REALITY settings, WARP and existing outbound routing. The collector's API listens on loopback only. Infrastructure network totals and per-user proxy counters remain separate metrics.
 
+## Current deployment and accounting scope
+
+As of 2026-10-15, the five existing amd64 hosts have passed the pinned-core rollout gates and cover six managed logical routes; SG2 and UK share one physical collector with separate user identities. New hosts remain opt-in and need independent calibration and pilot approval. The hidden JP and China direct backups are unmetered and outside this coverage.
+
+The portal keeps the native per-user byte ledger and the independent per-connection classification separate: flow reports do not add the same bytes to the ledger again. Since portal 1.7.0, destination views use only actual flow bytes, not the removed minute-associated estimate or its raw-detail endpoint. The native ledger includes older history that cannot be retroactively classified. See the [flow rollout and limits](kenxu-flow-rollout.md), including crash-loss windows; a successful current check does not establish complete historical coverage.
+
+For existing pinned-core hosts, maintain collectors with `kenxu_meter.yml`. Do not run the generic installer, `software.yml`, or the legacy `files/deploy_meter.sh` to replace their core. A reviewed core change uses `kenxu_flow_shadow.yml` and its serial gates. Bootstrap instructions below apply when the required infrastructure is missing, not as a mandatory repeat step on already accepted hosts.
+
 ## Prerequisites
 
 - Kenxu's metering backend is deployed and a node has been registered against a VLESS source entry.
@@ -89,13 +97,17 @@ The Xray service account must own `/var/log/kenxu` (default `xray:xray`, mode 07
 
 The parser accepts only authenticated `kenxu:` access records. It reads at most 1 MiB per sample, validates source IP and destination host/IP+port, limits targets, tracks a durable inode/offset cursor in the same transaction as queued reports, and bounds metadata to 128 KiB per report. Native online-IP queries supplement sources for ongoing connections. No URL path, payload, cookies, TLS decryption or external GeoIP calls are involved. Copy-truncate rotation and long-lived connections can omit target observations; these are best-effort metadata, not new accounting counters.
 
-The portal joins observed new targets and sources to existing **minute/logical-route byte totals**. Stock Xray does not supply per-target bytes: a row with multiple targets is not attribution of that row's entire usage to each target. Delayed samples retain accounting; metadata older than 30 days is redacted even from retry queues, while byte reports continue retrying. Portal 1.5.0 hashes the accounting envelope independently of metadata so a redacted retry remains idempotent.
+Portal 1.5.0 historically joined observed targets and sources to **minute/logical-route byte totals**. That estimate was not per-target accounting and has been removed from the current portal. Stock Xray still does not supply per-target bytes; the optional pinned observer supplies the current actual-flow classification separately. Delayed samples retain accounting; metadata older than 30 days is redacted even from retry queues, while byte reports continue retrying. The accounting envelope is hashed independently of metadata so a redacted retry remains idempotent.
 
-Only private administrators query these records. User profile data exposes only that user's latest observed source IP. Tell invited users about the logging scope. Unmanaged, direct/unmetered and bypass connections cannot be observed. An offline MMDB on the portal optionally supplies approximate country/region; a Country database does not establish a city.
+Destinations and their actual classified bytes are private-administrator-only. The user profile shows only the signed-in user's latest observed source IP and approximate country/region/city beside it, with no history panel or destination details. The legacy own-source API remains for compatibility and never grants access to another user's sources. Tell invited users about the logging scope. Unmanaged, direct/unmetered and bypass connections cannot be observed. An offline MMDB on the portal optionally supplies approximate country/region; a Country database does not establish a city.
+
+Portal 1.7.2 reads the latest source without an external call; on entering the profile, its protected POST may enrich only that observed public IP through the configured IPinfo Legacy Free provider when the cache is missing. Successful results are cached for seven days, failures back off for five minutes, and ordinary users have independent query limits. No account, subscription, or destination is sent. Private administration retains explicit selected-source queries. Locations are estimates, not device coordinates or a street address.
 
 ## Operational checks
 
-For the next per-connection byte-metering phase, see the [design and acceptance gates](kenxu-flow-design.md). The optional `kenxu_flow_preflight.yml` only inspects sanitized state; `tools/flow_contract.py` is an offline replay oracle, not a production collector or a core patch. Existing services and byte accounting remain unchanged.
+For the implemented per-connection byte-metering path, see the [design and acceptance gates](kenxu-flow-design.md) and [rollout evidence](kenxu-flow-rollout.md). The optional `kenxu_flow_preflight.yml` only inspects sanitized state; `tools/flow_contract.py` is an offline replay oracle, not a production collector or a core patch. Running either does not enable the feature or establish that a host has passed the real-byte calibration.
+
+On an accepted flow host, `tools/review_flow.py` is a read-only operational check: it brackets observer totals between native snapshots, checks loopback/socket/service guards and waits up to 30 seconds for normal in-flight uploads to drain. A persistent native or flow queue blocks promotion; do not delete queued bytes to obtain a passing result. A short successful check is not a long-duration soak test.
 
 ```sh
 systemctl is-active xray kenxu-meter
@@ -113,6 +125,8 @@ Tests use fictional credentials. No actual host inventories, IP addresses, UUIDs
 
 ## Rollback
 
-Stop `kenxu-meter`, validate `/var/lib/kenxu-meter/before-bootstrap.json` with `xray run -test`, restore it with the correct original owner/permissions, and restart Xray. Keep the portal usage database and collector queue for inspection. Restore a config backup before removing collectors if the node should stop accepting managed user credentials.
+For a non-flow bootstrap failure, stop `kenxu-meter`, validate `/var/lib/kenxu-meter/before-bootstrap.json` with `xray run -test`, restore it with the correct original owner/permissions, and restart Xray. Keep the portal usage database and collector queue for inspection. Restore a config backup before removing collectors if the node should stop accepting managed user credentials.
+
+For a pinned per-flow deployment, use the [flow-specific rollback procedure](kenxu-flow-rollout.md#生产门槛与回退): core/service fragments and collector code must be considered together. Do not treat the pre-bootstrap config as a complete flow rollback, and never replace a live queue or portal database with an older snapshot that would discard new usage.
 
 For ordinary maintenance, keep the collector enabled and manage the account through Kenxu rather than resetting server counters.
