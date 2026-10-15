@@ -18,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from kenxu_activity import access_batch, online_sources
+from kenxu_flow import FlowCollector
 
 
 def atomic_json(path, value, owner=None, mode=0o600):
@@ -130,6 +131,16 @@ class Meter:
         self.stop = False
         self.epoch = self.process_epoch()
         self.previous_counters = {}
+        self.flow = FlowCollector(self.db, self.settings, self.request) if self.settings.get('flow_enabled') else None
+
+    def flow_cycle(self, strict=False):
+        if self.flow:
+            try:
+                self.flow.cycle(256 if strict else 16)
+            except Exception as exc:
+                if strict:
+                    raise
+                print('Flow observation deferred: ' + type(exc).__name__, flush=True)
 
     def run_command(self, *args):
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
@@ -315,6 +326,7 @@ class Meter:
             except Exception as exc:
                 # Exception class only: urllib errors and raw commands may carry secrets.
                 print('Meter cycle deferred: ' + type(exc).__name__, flush=True)
+            self.flow_cycle()
             remaining = max(1, 15 - (time.monotonic() - started))
             for _ in range(int(remaining)):
                 if self.stop:
@@ -323,6 +335,7 @@ class Meter:
         try:
             self.sample()
             self.flush()
+            self.flow_cycle(strict=True)
         except Exception:
             pass
 
@@ -341,10 +354,12 @@ def main():
         meter.sync(bootstrap=True)
         meter.sample()
         meter.flush()
+        meter.flow_cycle(strict=True)
     elif args.once:
         meter.sync()
         meter.sample()
         meter.flush()
+        meter.flow_cycle(strict=True)
     else:
         meter.run()
 

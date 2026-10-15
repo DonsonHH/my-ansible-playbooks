@@ -14,7 +14,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/kenxu-meter {{ kenxu_meter_xray_config | default('/usr/local/etc/xray/config.json') | dirname }}
+ReadWritePaths=/var/lib/kenxu-meter {{ kenxu_meter_xray_config | default('/usr/local/etc/xray/config.json') | dirname }} -/var/lib/kenxu-flow
 
 [Install]
 WantedBy=multi-user.target

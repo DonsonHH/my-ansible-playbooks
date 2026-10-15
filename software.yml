@@ -187,6 +187,19 @@
         state: started
         enabled: true
 
+    - name: Detect a pinned per-flow core before running the generic installer
+      tags: [xray]
+      become: "{{ ansible_user != 'root' }}"
+      ansible.builtin.stat:
+        path: /etc/systemd/system/xray.service.d/70-kenxu-flow.conf
+      register: xray_flow_pinned
+
+    - name: Protect reviewed per-flow installations from an implicit latest upgrade
+      tags: [xray]
+      ansible.builtin.assert:
+        that: not xray_flow_pinned.stat.exists
+        fail_msg: This host uses a calibrated pinned core. Maintain it through kenxu_flow_shadow.yml; review a new upstream version in isolation first.
+
     - name: Install xray
       tags: [xray]
       changed_when: true

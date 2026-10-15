@@ -9,7 +9,17 @@ if [ ! -e /var/lib/kenxu-meter/pre-fleet-config.json ]; then
 fi
 install -m 700 "$stage/kenxu_meter.py" /usr/local/lib/kenxu-meter/kenxu_meter.py
 install -m 600 "$stage/kenxu_activity.py" /usr/local/lib/kenxu-meter/kenxu_activity.py
-install -m 600 "$stage/registration.json" /etc/kenxu-meter/config.json
+install -m 600 "$stage/kenxu_flow.py" /usr/local/lib/kenxu-meter/kenxu_flow.py
+python3 - "$stage/registration.json" <<'PY'
+import json,pathlib,os,sys
+target=pathlib.Path('/etc/kenxu-meter/config.json')
+value=json.loads(target.read_text()) if target.exists() else {}
+value.update(json.loads(pathlib.Path(sys.argv[1]).read_text()))
+temporary=target.with_name('config.json.next')
+with temporary.open('w') as stream:
+    json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
+os.chmod(temporary,0o600);os.replace(temporary,target)
+PY
 install -m 644 "$stage/kenxu-meter.service" /etc/systemd/system/kenxu-meter.service
 systemctl daemon-reload
 if /usr/bin/python3 /usr/local/lib/kenxu-meter/kenxu_meter.py --bootstrap; then

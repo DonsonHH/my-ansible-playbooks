@@ -1,0 +1,78 @@
+---
+- name: Reviewed, serial per-flow rollout on existing registered Xray nodes
+  hosts: all
+  become: true
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    kenxu_flow_enabled: false
+    kenxu_flow_calibrated: false
+    kenxu_flow_pilot_reviewed: false
+    kenxu_flow_users: []
+  tasks:
+    - name: Require the independent calibration and the correct promotion gate
+      ansible.builtin.assert:
+        that:
+          - kenxu_flow_enabled | bool
+          - kenxu_flow_calibrated | bool
+          - kenxu_flow_users | length > 0 or kenxu_flow_pilot_reviewed | bool
+          - kenxu_flow_binary is defined
+          - kenxu_flow_sha256 is match('^[a-f0-9]{64}$')
+        fail_msg: Explicitly approve the calibrated artifact; use a selected-user pilot before a batch rollout.
+
+    - name: Set a private content-addressed staging directory
+      ansible.builtin.set_fact:
+        kenxu_flow_stage: "/var/lib/kenxu-meter/stage-flow-{{ kenxu_flow_sha256[:16] }}"
+
+    - name: Create the private stage
+      ansible.builtin.file:
+        path: "{{ kenxu_flow_stage }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Stage the hash-checked core
+      ansible.builtin.copy:
+        src: "{{ kenxu_flow_binary }}"
+        dest: "{{ kenxu_flow_stage }}/xray-kenxu-amd64"
+        mode: '0700'
+
+    - name: Stage the independently reviewed collector and maintenance helper
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ kenxu_flow_stage }}/{{ item.name }}"
+        mode: '0600'
+      loop:
+        - {src: files/kenxu_meter.py, name: kenxu_meter.py}
+        - {src: files/kenxu_activity.py, name: kenxu_activity.py}
+        - {src: files/kenxu_flow.py, name: kenxu_flow.py}
+        - {src: tools/deploy_flow.py, name: deploy_flow.py}
+        - {src: tools/review_flow.py, name: review_flow.py}
+
+    - name: Write selected identities privately (empty means all managed users)
+      ansible.builtin.copy:
+        content: "{{ kenxu_flow_users | to_json }}"
+        dest: "{{ kenxu_flow_stage }}/users.json"
+        mode: '0600'
+      no_log: true
+
+    - name: Drain, atomically switch and verify this host before moving on
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - "{{ kenxu_flow_stage }}/deploy_flow.py"
+          - --stage
+          - "{{ kenxu_flow_stage }}"
+          - --sha256
+          - "{{ kenxu_flow_sha256 }}"
+          - --users-file
+          - "{{ kenxu_flow_stage }}/users.json"
+      no_log: true
+      changed_when: true
+
+    - name: Independently review live counters and private collector health before proceeding
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, "{{ kenxu_flow_stage }}/review_flow.py"]
+      changed_when: false
+      no_log: true

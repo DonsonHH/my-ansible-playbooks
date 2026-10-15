@@ -109,6 +109,31 @@
         group: root
         mode: '0600'
 
+    - name: Install optional per-flow transport without enabling it
+      ansible.builtin.copy:
+        src: files/kenxu_flow.py
+        dest: /usr/local/lib/kenxu-meter/kenxu_flow.py
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Inspect existing optional registration fields
+      ansible.builtin.stat:
+        path: /etc/kenxu-meter/config.json
+      register: kenxu_registration_stat
+
+    - name: Read existing registration privately
+      ansible.builtin.slurp:
+        src: /etc/kenxu-meter/config.json
+      register: kenxu_registration_previous
+      when: kenxu_registration_stat.stat.exists
+      no_log: true
+
+    - name: Preserve optional flow settings during ordinary meter maintenance
+      ansible.builtin.set_fact:
+        kenxu_registration_extra: "{{ (kenxu_registration_previous.content | b64decode | from_json) if kenxu_registration_stat.stat.exists else {} }}"
+      no_log: true
+
     - name: Create private Xray activity log directory
       ansible.builtin.file:
         path: /var/log/kenxu
@@ -129,7 +154,7 @@
 
     - name: Write private registration without exposing the token
       ansible.builtin.copy:
-        content: "{{ {'portal_origin': kenxu_meter_origin, 'node_id': kenxu_meter_node_id, 'token': kenxu_meter_token, 'inbound_port': kenxu_meter_inbound_port | int, 'api_port': kenxu_meter_api_port | int, 'xray_service': kenxu_meter_xray_service, 'xray_config': kenxu_meter_xray_config, 'activity_enabled': kenxu_meter_activity_enabled | bool, 'access_log': '/var/log/kenxu/access.log'} | to_nice_json }}"
+        content: "{{ kenxu_registration_extra | combine({'portal_origin': kenxu_meter_origin, 'node_id': kenxu_meter_node_id, 'token': kenxu_meter_token, 'inbound_port': kenxu_meter_inbound_port | int, 'api_port': kenxu_meter_api_port | int, 'xray_service': kenxu_meter_xray_service, 'xray_config': kenxu_meter_xray_config, 'activity_enabled': kenxu_meter_activity_enabled | bool, 'access_log': '/var/log/kenxu/access.log'}) | to_nice_json }}"
         dest: /etc/kenxu-meter/config.json
         owner: root
         group: root

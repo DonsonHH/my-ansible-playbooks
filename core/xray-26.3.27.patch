@@ -1,0 +1,248 @@
+diff --git a/app/dispatcher/default.go b/app/dispatcher/default.go
+index e6f8965..5a76368 100644
+--- a/app/dispatcher/default.go
++++ b/app/dispatcher/default.go
+@@ -7,6 +7,7 @@ import (
+ 	"sync"
+ 	"time"
+ 
++	"github.com/xtls/xray-core/app/kenxuflow"
+ 	"github.com/xtls/xray-core/common"
+ 	"github.com/xtls/xray-core/common/buf"
+ 	"github.com/xtls/xray-core/common/errors"
+@@ -165,7 +166,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
+ 			name := "user>>>" + user.Email + ">>>traffic>>>uplink"
+ 			if c, _ := stats.GetOrRegisterCounter(d.stats, name); c != nil {
+ 				inboundLink.Writer = &SizeStatWriter{
+-					Counter: c,
++					Counter: kenxuflow.Wrap(ctx, c, true),
+ 					Writer:  inboundLink.Writer,
+ 				}
+ 			}
+@@ -174,7 +175,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
+ 			name := "user>>>" + user.Email + ">>>traffic>>>downlink"
+ 			if c, _ := stats.GetOrRegisterCounter(d.stats, name); c != nil {
+ 				outboundLink.Writer = &SizeStatWriter{
+-					Counter: c,
++					Counter: kenxuflow.Wrap(ctx, c, false),
+ 					Writer:  outboundLink.Writer,
+ 				}
+ 			}
+@@ -207,14 +208,14 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
+ 		if p.Stats.UserUplink {
+ 			name := "user>>>" + user.Email + ">>>traffic>>>uplink"
+ 			if c, _ := stats.GetOrRegisterCounter(statsManager, name); c != nil {
+-				link.Reader.(*buf.TimeoutWrapperReader).Counter = c
++				link.Reader.(*buf.TimeoutWrapperReader).Counter = kenxuflow.Wrap(ctx, c, true)
+ 			}
+ 		}
+ 		if p.Stats.UserDownlink {
+ 			name := "user>>>" + user.Email + ">>>traffic>>>downlink"
+ 			if c, _ := stats.GetOrRegisterCounter(statsManager, name); c != nil {
+ 				link.Writer = &SizeStatWriter{
+-					Counter: c,
++					Counter: kenxuflow.Wrap(ctx, c, false),
+ 					Writer:  link.Writer,
+ 				}
+ 			}
+@@ -290,6 +291,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
+ 	ob := outbounds[len(outbounds)-1]
+ 	ob.OriginalTarget = destination
+ 	ob.Target = destination
++	ctx = kenxuflow.Begin(ctx, destination)
+ 	content := session.ContentFromContext(ctx)
+ 	if content == nil {
+ 		content = new(session.Content)
+@@ -347,6 +349,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
+ 	ob := outbounds[len(outbounds)-1]
+ 	ob.OriginalTarget = destination
+ 	ob.Target = destination
++	ctx = kenxuflow.Begin(ctx, destination)
+ 	content := session.ContentFromContext(ctx)
+ 	if content == nil {
+ 		content = new(session.Content)
+@@ -446,6 +449,7 @@ func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, netw
+ }
+ 
+ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {
++	defer kenxuflow.Finish(ctx)
+ 	outbounds := session.OutboundsFromContext(ctx)
+ 	ob := outbounds[len(outbounds)-1]
+ 
+@@ -500,6 +504,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
+ 	}
+ 
+ 	ob.Tag = handler.Tag()
++	kenxuflow.Routed(ctx, handler.Tag())
+ 	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
+ 		if tag := handler.Tag(); tag != "" {
+ 			if inTag == "" {
+diff --git a/app/dispatcher/stats.go b/app/dispatcher/stats.go
+index 8fac019..e08b03b 100644
+--- a/app/dispatcher/stats.go
++++ b/app/dispatcher/stats.go
+@@ -1,18 +1,24 @@
+ package dispatcher
+ 
+ import (
++	"context"
++	"github.com/xtls/xray-core/app/kenxuflow"
+ 	"github.com/xtls/xray-core/common"
+ 	"github.com/xtls/xray-core/common/buf"
+ 	"github.com/xtls/xray-core/features/stats"
+ )
+ 
++func (w *SizeStatWriter) RebindPeer(ctx context.Context) bool {
++	return kenxuflow.Rebind(w.Counter, ctx)
++}
++
+ type SizeStatWriter struct {
+ 	Counter stats.Counter
+ 	Writer  buf.Writer
+ }
+ 
+ func (w *SizeStatWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+-	w.Counter.Add(int64(mb.Len()))
++	kenxuflow.AddBuffer(w.Counter, mb)
+ 	return w.Writer.WriteMultiBuffer(mb)
+ }
+ 
+diff --git a/common/mux/server.go b/common/mux/server.go
+index d1cdac1..1663297 100644
+--- a/common/mux/server.go
++++ b/common/mux/server.go
+@@ -217,7 +217,12 @@ func (w *ServerWorker) handleStatusNew(ctx context.Context, meta *FrameMetadata,
+ 			b := buf.New()
+ 			b.Write(mb[0].Bytes())
+ 			b.UDP = mb[0].UDP
+-			if err = x.Mux.output.WriteMultiBuffer(mb); err != nil {
++			if binder, ok := x.Mux.output.(interface{ RebindPeer(context.Context) bool }); ok && !binder.RebindPeer(ctx) {
++				err = errors.New("XUDP authenticated identity changed")
++			} else {
++				err = x.Mux.output.WriteMultiBuffer(mb)
++			}
++			if err != nil {
+ 				x.Interrupt()
+ 				mb = buf.MultiBuffer{b}
+ 			} else {
+diff --git a/features/stats/stats.go b/features/stats/stats.go
+index abea745..7f74bdd 100644
+--- a/features/stats/stats.go
++++ b/features/stats/stats.go
+@@ -112,7 +112,13 @@ func GetOrRegisterCounter(m Manager, name string) (Counter, error) {
+ 		return counter, nil
+ 	}
+ 
+-	return m.RegisterCounter(name)
++	created, err := m.RegisterCounter(name)
++	if err != nil {
++		if existing := m.GetCounter(name); existing != nil {
++			return existing, nil
++		}
++	}
++	return created, err
+ }
+ 
+ // GetOrRegisterOnlineMap tries to get the OnlineMap first. If not exist, it then tries to create a new onlinemap.
+diff --git a/main/run.go b/main/run.go
+index 935dcad..376d6ac 100644
+--- a/main/run.go
++++ b/main/run.go
+@@ -14,6 +14,7 @@ import (
+ 	"syscall"
+ 	"time"
+ 
++	"github.com/xtls/xray-core/app/kenxuflow"
+ 	"github.com/xtls/xray-core/common/cmdarg"
+ 	"github.com/xtls/xray-core/common/errors"
+ 	clog "github.com/xtls/xray-core/common/log"
+@@ -91,7 +92,12 @@ func executeRun(cmd *base.Command, args []string) {
+ 		fmt.Println("Failed to start:", err)
+ 		os.Exit(-1)
+ 	}
+-	defer server.Close()
++	defer func() {
++		server.Close()
++		if err := kenxuflow.Shutdown(); err != nil {
++			log.Println("Kenxu final observer checkpoint failed")
++		}
++	}()
+ 
+ 	/*
+ 		conf.FileCache = nil
+diff --git a/proxy/proxy.go b/proxy/proxy.go
+index dbd81d6..b172f41 100644
+--- a/proxy/proxy.go
++++ b/proxy/proxy.go
+@@ -17,6 +17,7 @@ import (
+ 
+ 	"github.com/pires/go-proxyproto"
+ 	"github.com/xtls/xray-core/app/dispatcher"
++	"github.com/xtls/xray-core/app/kenxuflow"
+ 	"github.com/xtls/xray-core/common/buf"
+ 	"github.com/xtls/xray-core/common/errors"
+ 	"github.com/xtls/xray-core/common/net"
+@@ -750,6 +751,42 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
+ 			}
+ 		}
+ 		if splice {
++			if kenxuflow.Tracked(ctx) {
++				defer readerConn.SetReadDeadline(time.Time{})
++				for {
++					if ctx.Err() != nil {
++						return ctx.Err()
++					}
++					if err := readerConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
++						return err
++					}
++					w, err := tc.ReadFrom(&io.LimitedReader{R: readerConn, N: 1 << 20})
++					if w > 0 {
++						if readCounter != nil {
++							readCounter.Add(w)
++						}
++						if writeCounter != nil {
++							writeCounter.Add(w)
++						}
++						if sw, ok := writer.(*dispatcher.SizeStatWriter); ok {
++							sw.Counter.Add(w)
++						}
++						timer.Update()
++						if inTimer != nil {
++							inTimer.Update()
++						}
++					}
++					if timeout, ok := err.(interface{ Timeout() bool }); ok && timeout.Timeout() {
++						continue
++					}
++					if err != nil && errors.Cause(err) != io.EOF {
++						return err
++					}
++					if w == 0 || errors.Cause(err) == io.EOF {
++						return nil
++					}
++				}
++			}
+ 			errors.LogDebug(ctx, "CopyRawConn splice")
+ 			statWriter, _ := writer.(*dispatcher.SizeStatWriter)
+ 			//runtime.Gosched() // necessary
+diff --git a/proxy/vless/inbound/inbound.go b/proxy/vless/inbound/inbound.go
+index 02dc947..9fb0206 100644
+--- a/proxy/vless/inbound/inbound.go
++++ b/proxy/vless/inbound/inbound.go
+@@ -5,6 +5,7 @@ import (
+ 	"context"
+ 	gotls "crypto/tls"
+ 	"encoding/base64"
++	"github.com/xtls/xray-core/app/kenxuflow"
+ 	"io"
+ 	"reflect"
+ 	"strconv"
+@@ -610,6 +611,8 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
+ 	}
+ 
+ 	trafficState := proxy.NewTrafficState(userSentID)
++	ctx = kenxuflow.WithPeer(ctx, connection)
++	defer kenxuflow.PeerDone(ctx)
+ 	clientReader := encoding.DecodeBodyAddons(reader, request, requestAddons)
+ 	if requestAddons.Flow == vless.XRV {
+ 		clientReader = proxy.NewVisionReader(clientReader, trafficState, true, ctx, connection, input, rawInput, nil)
