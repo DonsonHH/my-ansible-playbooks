@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import time
+from urllib.parse import quote
 sys.path.insert(0,'/usr/local/lib/kenxu-meter')
 from kenxu_flow import UnixHTTP
 
@@ -20,6 +21,15 @@ def native(binary,server):
         if len(parts)==4 and parts[0]=='user' and parts[2]=='traffic':
             rows.setdefault(parts[1],{'up':0,'down':0})['up' if parts[3]=='uplink' else 'down']=int(item.get('value',0))
     return rows
+
+
+def await_empty_queue(database,timeout=30,sleep=time.sleep):
+    deadline=time.monotonic()+timeout
+    while True:
+        queues={table:database.execute('SELECT count(*) FROM '+table).fetchone()[0] for table in ['queue','flow_queue']}
+        if not any(queues.values()):return queues
+        if time.monotonic()>=deadline:raise AssertionError('Collector delivery backlog did not drain; do not promote')
+        sleep(min(.5,max(0,deadline-time.monotonic())))
 
 
 def review():
@@ -35,10 +45,11 @@ def review():
         if all(before.get(email,{}).get(direction,0)<=actual.get(email,{}).get(direction,0)<=after.get(email,{}).get(direction,0) for email in emails for direction in ['up','down']):break
         time.sleep(.1)
     else:raise AssertionError('Native and observed cumulative counters do not reconcile')
-    database=sqlite3.connect(str(pathlib.Path(settings.get('state_dir','/var/lib/kenxu-meter'))/'queue.sqlite'))
+    database=sqlite3.connect('file:'+quote(str(pathlib.Path(settings.get('state_dir','/var/lib/kenxu-meter'))/'queue.sqlite'))+'?mode=ro',uri=True)
     try:
+        queues=await_empty_queue(database)
         pid=subprocess.check_output(['systemctl','show','xray','-p','MainPID','--value'],text=True).strip();executable=pathlib.Path('/proc/'+pid+'/exe').resolve();config=json.loads(pathlib.Path(settings.get('xray_config','/usr/local/etc/xray/config.json')).read_text())
-        result={'ok':True,'nativeObserverReconciled':True,'scope':observed['scope'],'observedUsers':len(observed['totals']),'binarySha256':hashlib.sha256(executable.read_bytes()).hexdigest(),'apiLoopback':config.get('api',{}).get('listen')==server,'privateSocket':stat.S_IMODE(socket.stat().st_mode)==0o600,'nativeQueue':database.execute('SELECT count(*) FROM queue').fetchone()[0],'flowQueue':database.execute('SELECT count(*) FROM flow_queue').fetchone()[0],'queueIntegrity':database.execute('PRAGMA integrity_check').fetchone()[0]=='ok','services':all(subprocess.call(['systemctl','is-active','--quiet',s])==0 for s in ['xray','kenxu-meter'])}
+        result={'ok':True,'nativeObserverReconciled':True,'scope':observed['scope'],'observedUsers':len(observed['totals']),'binarySha256':hashlib.sha256(executable.read_bytes()).hexdigest(),'apiLoopback':config.get('api',{}).get('listen')==server,'privateSocket':stat.S_IMODE(socket.stat().st_mode)==0o600,'nativeQueue':queues['queue'],'flowQueue':queues['flow_queue'],'queueIntegrity':database.execute('PRAGMA integrity_check').fetchone()[0]=='ok','services':all(subprocess.call(['systemctl','is-active','--quiet',s])==0 for s in ['xray','kenxu-meter'])}
         if not all(result[k] for k in ['apiLoopback','privateSocket','queueIntegrity','services']):raise AssertionError('Post-rollout operational guard failed')
         return result
     finally:database.close()
