@@ -5,7 +5,11 @@ import sys
 import json
 import sqlite3
 import time
-from unittest.mock import MagicMock
+import os
+import stat
+import tempfile
+from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / 'files'))
 
 if sys.platform == 'win32':
@@ -17,6 +21,62 @@ spec.loader.exec_module(meter)
 
 
 class MeterTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == 'win32', 'Requires POSIX file ownership')
+    def test_bootstrap_prepares_xray_owned_log_before_root_config_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory);target = root / 'config.json';log = root / 'logs' / 'access.log'
+            target.write_text(json.dumps({'inbounds':[{'protocol':'vless','port':443,'settings':{'clients':[]}}],'outbounds':[{'tag':'block'}]}))
+            collector = meter.Meter.__new__(meter.Meter)
+            collector.root = root
+            collector.settings = {'node_id':'fixture','xray_config':str(target),'activity_enabled':True,'access_log':str(log)}
+            collector.request = MagicMock(return_value={'nodeId':'fixture','clients':[],'revision':'fixture'})
+            collector.restart_core = MagicMock()
+            collector.runtime_users = MagicMock(return_value={})
+            def validate(*args):
+                self.assertEqual(args[1:3], ('run','-test'))
+                self.assertTrue(log.is_file(), 'Root validation must not be the first creator')
+                self.assertEqual((log.stat().st_uid,log.stat().st_gid),(os.getuid(),os.getgid()))
+                self.assertEqual(stat.S_IMODE(log.stat().st_mode),0o600)
+                return ''
+            collector.run_command = MagicMock(side_effect=validate)
+            with patch('pwd.getpwnam',return_value=SimpleNamespace(pw_uid=os.getuid(),pw_gid=os.getgid())):
+                collector.sync_locked(bootstrap=True)
+            self.assertTrue(collector.run_command.called)
+            collector.restart_core.assert_called_once()
+            self.assertEqual(json.loads(target.read_text())['log']['access'],str(log))
+
+    @unittest.skipIf(sys.platform == 'win32', 'Requires POSIX file ownership')
+    def test_activity_log_is_private_before_validation_and_existing_bytes_survive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'activity' / 'access.log'
+            owner = (os.getuid(), os.getgid())
+            meter.prepare_activity_log(path, owner)
+            self.assertEqual((path.stat().st_uid, path.stat().st_gid), owner)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            path.write_bytes(b'preserve-private-access-records\n')
+            inode = path.stat().st_ino
+            os.chmod(path, 0o644)
+            meter.prepare_activity_log(path, owner)
+            self.assertEqual(path.read_bytes(), b'preserve-private-access-records\n')
+            self.assertEqual(path.stat().st_ino, inode)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    @unittest.skipIf(sys.platform == 'win32', 'Requires POSIX symlinks and special files')
+    def test_activity_log_refuses_symlinks_hardlinks_and_special_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            owner = (os.getuid(), os.getgid())
+            target = root / 'kept';target.write_bytes(b'kept')
+            link = root / 'access.log';link.symlink_to(target)
+            with self.assertRaises(OSError):meter.prepare_activity_log(link, owner)
+            link.unlink();os.link(target, link)
+            with self.assertRaises(ValueError):meter.prepare_activity_log(link, owner)
+            link.unlink();os.mkfifo(link)
+            with self.assertRaises((ValueError, OSError)):meter.prepare_activity_log(link, owner)
+            link.unlink();parent = root / 'logs';parent.symlink_to(root, target_is_directory=True)
+            with self.assertRaises(ValueError):meter.prepare_activity_log(parent / 'access.log', owner)
+            self.assertEqual(target.read_bytes(), b'kept')
+
     def test_queue_redacts_expired_metadata_without_dropping_accounting(self):
         collector = meter.Meter.__new__(meter.Meter)
         collector.db = sqlite3.connect(':memory:')

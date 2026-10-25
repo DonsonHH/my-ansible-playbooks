@@ -10,6 +10,10 @@ The portal keeps the native per-user byte ledger and the independent per-connect
 
 For existing pinned-core hosts, maintain collectors with `kenxu_meter.yml`. Do not run the generic installer, `software.yml`, or the legacy `files/deploy_meter.sh` to replace their core. A reviewed core change uses `kenxu_flow_shadow.yml` and its serial gates. Bootstrap instructions below apply when the required infrastructure is missing, not as a mandatory repeat step on already accepted hosts.
 
+The [2026-10-25 review](review-20261025-new-host.md) records an additional physical host with separate ordinary and residential-IPv6 logical routes, owner-only residential access, and retirement of JP. Its performance exception was explicitly approved for that host; the default calibration gates remain unchanged.
+
+Before root validates an updated Xray configuration, the collector prepares the access log with the Xray account as owner and mode `0600`. This prevents validation from creating a root-owned log that the service cannot subsequently open. Existing records are preserved; symlinks, hard links and special files are refused. The playbook still manages the private log directory and its thirty-day rotation separately.
+
 ## Prerequisites
 
 - Kenxu's metering backend is deployed and a node has been registered against a VLESS source entry.

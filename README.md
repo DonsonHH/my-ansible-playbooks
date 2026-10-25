@@ -37,6 +37,10 @@ ansible/
 
 默认流程不启用计量。在未固定 flow 核心的普通主机上，将 `kenxu_meter_enabled` 设为 true 时，普通 Xray 模板更新后会重新同步受管客户端。`software.yml` 会阻止直接覆盖固定 flow 核心和定制转发拓扑；现有主机通过 `kenxu_meter.yml` 维护采集器，核心升级另走经过验收的 `kenxu_flow_shadow.yml`，保留原始配置与动态队列。
 
+2026-10-25 新主机与仓库复核见 [本轮记录](docs/review-20261025-new-host.md)。新加入的普通线路与限额住宅 IPv6 线路共用一个物理采集器，使用独立的用户身份和出站；住宅线路只对指定账号开放。JP 已取消，其历史记录保留。新主机的性能 CPU 门槛未通过后取得了针对该主机的明确例外批准，不能推广为其他机器默认放宽门槛。
+
+首次开启访问日志时，采集器在 root 校验 Xray 配置之前先创建由 Xray 账号所有的私有日志，避免校验成功后服务因日志权限无法启动。现有日志内容不截断；Linux 文件权限回归测试覆盖此过程。
+
 - 新建/编辑加密变量
 ```bash
 ansible-vault edit group_vars/all/vault.yml

@@ -39,6 +39,28 @@ def atomic_json(path, value, owner=None, mode=0o600):
             os.unlink(temporary)
 
 
+def prepare_activity_log(path, owner):
+    """Create before root config validation so Xray can open its own log."""
+    path = pathlib.Path(path)
+    if path.parent.is_symlink():
+        raise ValueError('Activity log directory must not be a symlink')
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, mode=0o700)
+        os.chown(path.parent, *owner)
+    if not path.parent.is_dir():
+        raise ValueError('Activity log parent must be a directory')
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError('Activity log must be one private regular file')
+        os.fchown(descriptor, *owner)
+        os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+    # Do not truncate existing access records or rotate an active file.
+
+
 def prepare_config(original, clients, inbound_port=443, api_port=10085, routes=None, activity_log=None):
     config = copy.deepcopy(original)
     matches = [i for i in config.get('inbounds', []) if i.get('protocol') == 'vless' and i.get('port') == inbound_port]
@@ -252,6 +274,10 @@ class Meter:
             owner_stat = target.stat()
             candidate = self.root / 'candidate.json'
             atomic_json(candidate, updated)
+            if self.settings.get('activity_enabled'):
+                import pwd
+                account = pwd.getpwnam('xray')
+                prepare_activity_log(self.settings.get('access_log', '/var/log/kenxu/access.log'), (account.pw_uid, account.pw_gid))
             self.run_command(self.settings.get('xray_binary', '/usr/local/bin/xray'), 'run', '-test', '-config', str(candidate))
             if bootstrap:
                 backup = self.root / 'before-bootstrap.json'
