@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import traceback
+from meter_service import flow_meter_dropin
 
 
 def command(*args,timeout=30):
@@ -41,6 +42,8 @@ def deploy(stage,expected,users):
     if not expected or digest(binary)!=expected:raise ValueError('Candidate SHA-256 mismatch')
     os.chmod(binary,0o700)
     registration=pathlib.Path('/etc/kenxu-meter/config.json');settings=json.loads(registration.read_text())
+    # Reject unreviewed sandbox destinations before stopping either service.
+    meter_sandbox=flow_meter_dropin(settings).encode()
     config=pathlib.Path(settings.get('xray_config','/usr/local/etc/xray/config.json'));old_config=config.read_bytes();parsed=json.loads(old_config)
     if settings.get('xray_service','xray')!='xray' or settings.get('inbound_port',443)!=443:raise ValueError('Review nonstandard service before deployment')
     inbound=[i for i in parsed['inbounds'] if i.get('protocol')=='vless' and i.get('port')==443]
@@ -96,7 +99,7 @@ def deploy(stage,expected,users):
         drop.parent.mkdir(parents=True,exist_ok=True)
         content='[Service]\nEnvironment="KENXU_FLOW_SOCKET=/var/lib/kenxu-flow/observer.sock"\nEnvironment="KENXU_FLOW_USERS='+','.join(users)+'"\nExecStart=\nExecStart='+str(installed)+' run -config '+str(config)+'\nReadWritePaths=/var/lib/kenxu-flow\n'
         atomic(drop,content.encode(),0o644)
-        meter_drop.parent.mkdir(parents=True,exist_ok=True);atomic(meter_drop,b'[Service]\nReadWritePaths=/var/lib/kenxu-flow\n',0o644)
+        meter_drop.parent.mkdir(parents=True,exist_ok=True);atomic(meter_drop,meter_sandbox,0o644)
         for name in ['kenxu_meter.py','kenxu_activity.py','kenxu_flow.py']:
             shutil.copy2(stage/name,collector/name);os.chmod(collector/name,0o700 if name=='kenxu_meter.py' else 0o600)
         settings.update(flow_enabled=True,flow_socket='/var/lib/kenxu-flow/observer.sock');atomic(registration,json.dumps(settings).encode())

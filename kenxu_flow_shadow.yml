@@ -48,6 +48,7 @@
         - {src: files/kenxu_activity.py, name: kenxu_activity.py}
         - {src: files/kenxu_flow.py, name: kenxu_flow.py}
         - {src: tools/deploy_flow.py, name: deploy_flow.py}
+        - {src: tools/meter_service.py, name: meter_service.py}
         - {src: tools/review_flow.py, name: review_flow.py}
 
     - name: Write selected identities privately (empty means all managed users)

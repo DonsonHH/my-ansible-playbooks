@@ -32,6 +32,15 @@ def await_empty_queue(database,timeout=30,sleep=time.sleep):
         sleep(min(.5,max(0,deadline-time.monotonic())))
 
 
+def assert_desired_applied(desired,cached,runtime):
+    expected={client['email']:{'id':client['id'],'level':client.get('level',0),'flow':client.get('flow','')} for client in desired['clients']}
+    if cached.get('revision')!=desired.get('revision') or not desired.get('revision'):
+        raise AssertionError('Collector desired revision is stale; do not promote')
+    if runtime!=expected:
+        raise AssertionError('Managed runtime users differ from desired state; do not promote')
+    return {'desiredRevisionCurrent':True,'managedRuntimeMatches':True,'desiredClients':len(expected)}
+
+
 def review():
     settings=json.loads(pathlib.Path('/etc/kenxu-meter/config.json').read_text());binary=settings.get('xray_binary','/usr/local/bin/xray');server='127.0.0.1:'+str(settings.get('api_port',10085));socket=pathlib.Path(settings.get('flow_socket','/var/lib/kenxu-flow/observer.sock'))
     for _ in range(20):
@@ -49,7 +58,12 @@ def review():
     try:
         queues=await_empty_queue(database)
         pid=subprocess.check_output(['systemctl','show','xray','-p','MainPID','--value'],text=True).strip();executable=pathlib.Path('/proc/'+pid+'/exe').resolve();config=json.loads(pathlib.Path(settings.get('xray_config','/usr/local/etc/xray/config.json')).read_text())
-        result={'ok':True,'nativeObserverReconciled':True,'scope':observed['scope'],'observedUsers':len(observed['totals']),'binarySha256':hashlib.sha256(executable.read_bytes()).hexdigest(),'apiLoopback':config.get('api',{}).get('listen')==server,'privateSocket':stat.S_IMODE(socket.stat().st_mode)==0o600,'nativeQueue':queues['queue'],'flowQueue':queues['flow_queue'],'queueIntegrity':database.execute('PRAGMA integrity_check').fetchone()[0]=='ok','services':all(subprocess.call(['systemctl','is-active','--quiet',s])==0 for s in ['xray','kenxu-meter'])}
+        from kenxu_meter import Meter
+        reader=Meter.__new__(Meter);reader.settings=settings
+        desired=reader.request('/api/meter/desired');cached=json.loads((pathlib.Path(settings.get('state_dir','/var/lib/kenxu-meter'))/'desired.json').read_text())
+        inbound=next(i for i in config['inbounds'] if i.get('protocol')=='vless' and i.get('port')==settings.get('inbound_port',443))
+        desired_status=assert_desired_applied(desired,cached,reader.runtime_users(inbound['tag']))
+        result={'ok':True,**desired_status,'nativeObserverReconciled':True,'scope':observed['scope'],'observedUsers':len(observed['totals']),'binarySha256':hashlib.sha256(executable.read_bytes()).hexdigest(),'apiLoopback':config.get('api',{}).get('listen')==server,'privateSocket':stat.S_IMODE(socket.stat().st_mode)==0o600,'nativeQueue':queues['queue'],'flowQueue':queues['flow_queue'],'queueIntegrity':database.execute('PRAGMA integrity_check').fetchone()[0]=='ok','services':all(subprocess.call(['systemctl','is-active','--quiet',s])==0 for s in ['xray','kenxu-meter'])}
         if not all(result[k] for k in ['apiLoopback','privateSocket','queueIntegrity','services']):raise AssertionError('Post-rollout operational guard failed')
         return result
     finally:database.close()

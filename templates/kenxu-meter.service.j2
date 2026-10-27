@@ -15,6 +15,10 @@ PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/kenxu-meter {{ kenxu_meter_xray_config | default('/usr/local/etc/xray/config.json') | dirname }} -/var/lib/kenxu-flow
+{% if kenxu_meter_activity_enabled | default(true) | bool %}
+# Config validation opens the activity log for writing inside this sandbox.
+ReadWritePaths=/var/log/kenxu
+{% endif %}
 
 [Install]
 WantedBy=multi-user.target

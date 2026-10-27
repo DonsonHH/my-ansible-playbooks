@@ -111,7 +111,22 @@ Portal 1.7.2 reads the latest source without an external call; on entering the p
 
 For the implemented per-connection byte-metering path, see the [design and acceptance gates](kenxu-flow-design.md) and [rollout evidence](kenxu-flow-rollout.md). The optional `kenxu_flow_preflight.yml` only inspects sanitized state; `tools/flow_contract.py` is an offline replay oracle, not a production collector or a core patch. Running either does not enable the feature or establish that a host has passed the real-byte calibration.
 
-On an accepted flow host, `tools/review_flow.py` is a read-only operational check: it brackets observer totals between native snapshots, checks loopback/socket/service guards and waits up to 30 seconds for normal in-flight uploads to drain. A persistent native or flow queue blocks promotion; do not delete queued bytes to obtain a passing result. A short successful check is not a long-duration soak test.
+On an accepted flow host, `tools/review_flow.py` is a read-only operational check: it brackets observer totals between native snapshots, checks loopback/socket/service guards and waits up to 30 seconds for normal in-flight uploads to drain. It also fetches the current desired configuration from the portal and requires both its cached revision and actual Xray runtime users to match. Healthy heartbeats, counters and empty queues alone cannot establish successful user synchronization. A persistent native or flow queue blocks promotion; do not delete queued bytes to obtain a passing result. A short successful check is not a long-duration soak test.
+
+### Active collectors with users waiting for synchronization
+
+Check the desired revision before assuming collection has stopped. With activity logging enabled, the collector's configuration preparation and `xray run -test` open `/var/log/kenxu/access.log` for writing. `ProtectSystem=strict` therefore needs the narrow `ReadWritePaths=/var/log/kenxu` exception in addition to the meter, Xray configuration and observer state directories. Correct file ownership outside the service sandbox does not prove sandbox access. The current base template and flow deployment include this exception only when activity logging is enabled.
+
+The [2026-10-28 repair](review-20261028-meter-sync.md) reproduced this distinction using the same candidate configuration inside a strict transient service: validation failed without the private log directory exception and passed with it. Old managed users continued to report native bytes while changed desired configurations could not apply.
+
+For an affected existing standard host, stage `tools/repair_meter_sandbox.py`, `tools/meter_service.py` and `tools/review_flow.py` together in a private directory. After inspecting the host, run as root:
+
+```sh
+python3 /PRIVATE_REVIEWED_STAGE/repair_meter_sandbox.py --apply
+python3 /PRIVATE_REVIEWED_STAGE/review_flow.py
+```
+
+The guarded repair requires the standard enabled access log, strict sandbox, running core and drained queues. It saves private configuration/drop-in evidence, adds only the missing log-directory exception, and gracefully restarts collection. Success requires the same Xray PID, unchanged private collector registration, matching live users and current revision, and drained delivery queues. It does not restart Xray, regenerate credentials or replace queue databases. An already configured host skips mutation; still run the independent review. Inspect a failed guard before retrying, rather than widening permissions or deleting state. Nonstandard log paths or services require a separate review.
 
 ```sh
 systemctl is-active xray kenxu-meter
