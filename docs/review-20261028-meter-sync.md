@@ -30,3 +30,16 @@ The portal comparison preserved account metadata, grants, credentials, rule prof
 - Portal unit/API suite: 84 passed. The monitor repository's JavaScript regression suite also passed; it is separate from per-user metering.
 
 No CI workflow exists in this deployment repository; local and live checks above are the evidence. A healthy current snapshot does not prove lossless historical collection or replace a future host's independent calibration.
+
+## Follow-up review
+
+A later independent review found two maintenance/acceptance gaps, reproduced them in isolation and corrected them:
+
+1. A failure after starting the repaired collector restored the original service fragment but left the process in the new mount namespace. Reloading systemd and starting an already active unit does not recreate that process. Rollback now gracefully stops collection before restoring/reloading the fragment and starting under its original sandbox. Tests cover both an absent and a pre-existing fragment, preserving private configuration and queue bytes while never restarting Xray.
+2. The operational review accepted matching cached revision and runtime users without comparing persisted users. A fixture with a missing managed client on disk incorrectly passed. The review now compares persisted managed identities too, while excluding legacy clients from collector ownership.
+
+The two regressions failed against the preceding code and passed after correction. The complete Linux suite now has **35 passing tests with no skips**. The Windows run has four explicitly skipped POSIX checks; it is not substituted for Linux acceptance.
+
+All six physical hosts subsequently passed the strengthened operational review and additional non-disruptive persistence checks: enabled boot services, the persistent narrow log exception and the running process's writable log mount, private log ownership/modes, saved configuration validation as the Xray service account, and unchanged core PID during review. Reapplying the collector's managed configuration preparation to the saved configuration produced no difference. Queues were empty and the preceding 15 minutes contained no desired-sync deferrals at the sampled checks.
+
+The portal still reported all assigned managed routes synchronized for every active account; its 84 unit/API tests passed. Account permissions, all 21 ready-user exports and the retained ledger prefix again matched the protected baseline. No production rollback was triggered to test the failure path, and no core or collector restart was required by this follow-up review.

@@ -35,13 +35,13 @@ class ReviewFlowTests(unittest.TestCase):
         desired={'revision':'new','clients':[{'email':'fixture-user','id':'fixture-id','level':88,'flow':'xtls-rprx-vision'}]}
         runtime={'fixture-user':{'id':'fixture-id','level':88,'flow':'xtls-rprx-vision'}}
         with self.assertRaisesRegex(AssertionError,'revision is stale'):
-            assert_desired_applied(desired,{'revision':'old'},runtime)
-        self.assertEqual(assert_desired_applied(desired,{'revision':'new'},runtime),{'desiredRevisionCurrent':True,'managedRuntimeMatches':True,'desiredClients':1})
+            assert_desired_applied(desired,{'revision':'old'},runtime,runtime)
+        self.assertEqual(assert_desired_applied(desired,{'revision':'new'},runtime,runtime),{'desiredRevisionCurrent':True,'managedRuntimeMatches':True,'persistedUsersMatch':True,'desiredClients':1})
 
     def test_revision_alone_does_not_prove_the_expected_clients_are_running(self):
         desired={'revision':'same','clients':[{'email':'fixture-user','id':'fixture-id','level':88}]}
         with self.assertRaisesRegex(AssertionError,'runtime users differ'):
-            assert_desired_applied(desired,{'revision':'same'},{})
+            assert_desired_applied(desired,{'revision':'same'},{},{})
 
 
 if __name__=='__main__':

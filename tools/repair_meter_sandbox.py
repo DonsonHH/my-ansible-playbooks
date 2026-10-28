@@ -124,6 +124,10 @@ def repair():
         return result
     except Exception:
         if changed:
+            # daemon-reload changes the next process, not the mount namespace
+            # of a collector already started above. Gracefully stop it before
+            # restoring the fragment, then start under the original sandbox.
+            command('systemctl', 'stop', 'kenxu-meter', timeout=90)
             if previous is None:
                 drop.unlink(missing_ok=True)
             else:

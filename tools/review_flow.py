@@ -32,13 +32,15 @@ def await_empty_queue(database,timeout=30,sleep=time.sleep):
         sleep(min(.5,max(0,deadline-time.monotonic())))
 
 
-def assert_desired_applied(desired,cached,runtime):
+def assert_desired_applied(desired,cached,runtime,persisted):
     expected={client['email']:{'id':client['id'],'level':client.get('level',0),'flow':client.get('flow','')} for client in desired['clients']}
     if cached.get('revision')!=desired.get('revision') or not desired.get('revision'):
         raise AssertionError('Collector desired revision is stale; do not promote')
     if runtime!=expected:
         raise AssertionError('Managed runtime users differ from desired state; do not promote')
-    return {'desiredRevisionCurrent':True,'managedRuntimeMatches':True,'desiredClients':len(expected)}
+    if persisted!=expected:
+        raise AssertionError('Persisted managed users differ from desired state; do not promote')
+    return {'desiredRevisionCurrent':True,'managedRuntimeMatches':True,'persistedUsersMatch':True,'desiredClients':len(expected)}
 
 
 def review():
@@ -62,7 +64,8 @@ def review():
         reader=Meter.__new__(Meter);reader.settings=settings
         desired=reader.request('/api/meter/desired');cached=json.loads((pathlib.Path(settings.get('state_dir','/var/lib/kenxu-meter'))/'desired.json').read_text())
         inbound=next(i for i in config['inbounds'] if i.get('protocol')=='vless' and i.get('port')==settings.get('inbound_port',443))
-        desired_status=assert_desired_applied(desired,cached,reader.runtime_users(inbound['tag']))
+        persisted={client['email']:{'id':client['id'],'level':client.get('level',0),'flow':client.get('flow','')} for client in inbound['settings']['clients'] if client.get('email','').startswith('kenxu:')}
+        desired_status=assert_desired_applied(desired,cached,reader.runtime_users(inbound['tag']),persisted)
         result={'ok':True,**desired_status,'nativeObserverReconciled':True,'scope':observed['scope'],'observedUsers':len(observed['totals']),'binarySha256':hashlib.sha256(executable.read_bytes()).hexdigest(),'apiLoopback':config.get('api',{}).get('listen')==server,'privateSocket':stat.S_IMODE(socket.stat().st_mode)==0o600,'nativeQueue':queues['queue'],'flowQueue':queues['flow_queue'],'queueIntegrity':database.execute('PRAGMA integrity_check').fetchone()[0]=='ok','services':all(subprocess.call(['systemctl','is-active','--quiet',s])==0 for s in ['xray','kenxu-meter'])}
         if not all(result[k] for k in ['apiLoopback','privateSocket','queueIntegrity','services']):raise AssertionError('Post-rollout operational guard failed')
         return result
